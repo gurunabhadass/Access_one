@@ -34,12 +34,12 @@ jobs:
         with:
           packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
 
-      - name: Prepare web assets
+      - name: Prepare AccessOne website
         shell: bash
         run: |
           set -euo pipefail
-          test -f index.html
-          test -f logo.png
+          test -f index.html || { echo "ERROR: index.html is missing from repository root"; exit 1; }
+          test -f logo.png || { echo "ERROR: logo.png is missing from repository root"; exit 1; }
           mkdir -p www
           cp index.html www/index.html
 
@@ -53,57 +53,96 @@ jobs:
           npx cap init "AccessOne" "com.accessone.app" --web-dir www
           npx cap add android
 
-      - name: Configure Android permissions and uploaded app icon
+      - name: Configure camera, internet, launcher logo and Android Back button
         shell: bash
         run: |
           set -euo pipefail
           python3 -m pip install --user Pillow
           python3 - <<'PY'
           from pathlib import Path
-          import re
-          p = Path('android/app/src/main/AndroidManifest.xml')
-          text = p.read_text()
-          for perm in ['android.permission.CAMERA', 'android.permission.INTERNET']:
-              marker = f'<uses-permission android:name="{perm}" />'
-              if marker not in text:
-                  text = text.replace('<application', marker + '\n    <application', 1)
-          if 'android.hardware.camera' not in text:
-              text = text.replace('<application', '<uses-feature android:name="android.hardware.camera" android:required="false" />\n    <application', 1)
-          p.write_text(text)
-          PY
-          python3 - <<'PY'
-          from pathlib import Path
           from PIL import Image
           import re
-          src = Image.open('logo.png').convert('RGBA')
-          side = min(src.size)
-          x, y = (src.width-side)//2, (src.height-side)//2
-          src = src.crop((x, y, x+side, y+side))
-          res = Path('android/app/src/main/res')
-          for density, size in {'mdpi':48,'hdpi':72,'xhdpi':96,'xxhdpi':144,'xxxhdpi':192}.items():
-              d = res / f'mipmap-{density}'
-              d.mkdir(parents=True, exist_ok=True)
-              icon = src.resize((size,size), Image.Resampling.LANCZOS)
-              icon.save(d/'ic_launcher.png')
-              icon.save(d/'ic_launcher_round.png')
-          p = Path('android/app/src/main/AndroidManifest.xml')
-          text = p.read_text()
-          m = re.search(r'<application\b[^>]*>', text, re.S)
-          if not m:
-              raise SystemExit('Android application tag missing')
-          tag = m.group(0)
-          for attr, val in [('android:icon','@mipmap/ic_launcher'), ('android:roundIcon','@mipmap/ic_launcher_round'), ('android:label','AccessOne')]:
-              if re.search(attr+r'="[^"]*"', tag):
-                  tag = re.sub(attr+r'="[^"]*"', attr+'="'+val+'"', tag)
+
+          manifest = Path('android/app/src/main/AndroidManifest.xml')
+          xml = manifest.read_text()
+
+          # AccessOne needs camera access for face scanning and internet for its CDN-loaded face models/libraries.
+          for permission in ('android.permission.CAMERA', 'android.permission.INTERNET'):
+              if permission not in xml:
+                  xml = xml.replace('<application', f'<uses-permission android:name="{permission}" />\\n    <application', 1)
+
+          if 'android.hardware.camera' not in xml:
+              xml = xml.replace('<application', '<uses-feature android:name="android.hardware.camera" android:required="false" />\\n    <application', 1)
+
+          # Use the exact repository logo as launcher icon (density variants are resized copies only).
+          app_match = re.search(r'<application\\b[^>]*>', xml, re.DOTALL)
+          if not app_match:
+              raise SystemExit('ERROR: AndroidManifest.xml has no application tag')
+          app_tag = app_match.group(0)
+          for attr, value in (
+              ('android:label', 'AccessOne'),
+              ('android:icon', '@mipmap/ic_launcher'),
+              ('android:roundIcon', '@mipmap/ic_launcher_round'),
+          ):
+              if re.search(r'\\s' + attr + r'="[^"]*"', app_tag):
+                  app_tag = re.sub(r'\\s' + attr + r'="[^"]*"', f' {attr}="{value}"', app_tag)
               else:
-                  tag = tag[:-1]+' '+attr+'="'+val+'">'
-          p.write_text(text[:m.start()] + tag + text[m.end():])
+                  app_tag = app_tag[:-1] + f' {attr}="{value}">'
+          xml = xml[:app_match.start()] + app_tag + xml[app_match.end():]
+          manifest.write_text(xml)
+
+          logo = Image.open('logo.png').convert('RGBA')
+          # Square crop for Android launcher masks, preserving the uploaded artwork.
+          side = min(logo.width, logo.height)
+          left = (logo.width - side) // 2
+          top = (logo.height - side) // 2
+          logo = logo.crop((left, top, left + side, top + side))
+          res = Path('android/app/src/main/res')
+          for density, size in {
+              'mdpi': 48, 'hdpi': 72, 'xhdpi': 96,
+              'xxhdpi': 144, 'xxxhdpi': 192,
+          }.items():
+              folder = res / f'mipmap-{density}'
+              folder.mkdir(parents=True, exist_ok=True)
+              icon = logo.resize((size, size), Image.Resampling.LANCZOS)
+              icon.save(folder / 'ic_launcher.png')
+              icon.save(folder / 'ic_launcher_round.png')
+
+          # Android Back: first navigate WebView history; if none exists, close the Activity normally.
+          java_dir = Path('android/app/src/main/java/com/accessone/app')
+          java_dir.mkdir(parents=True, exist_ok=True)
+          (java_dir / 'MainActivity.java').write_text('''package com.accessone.app;
+
+          import android.os.Bundle;
+          import android.webkit.WebView;
+          import com.getcapacitor.BridgeActivity;
+
+          public class MainActivity extends BridgeActivity {
+              @Override
+              public void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+              }
+
+              @Override
+              @SuppressWarnings("deprecation")
+              public void onBackPressed() {
+                  if (getBridge() != null && getBridge().getWebView() != null) {
+                      WebView webView = getBridge().getWebView();
+                      if (webView.canGoBack()) {
+                          webView.goBack();
+                          return;
+                      }
+                  }
+                  super.onBackPressed();
+              }
+          }
+          ''')
           PY
 
       - name: Sync Capacitor
         run: npx cap sync android
 
-      - name: Build debug APK
+      - name: Build AccessOne debug APK
         shell: bash
         run: |
           set -euo pipefail
@@ -111,7 +150,7 @@ jobs:
           chmod +x gradlew
           ./gradlew assembleDebug
 
-      - name: Upload APK
+      - name: Upload AccessOne APK
         uses: actions/upload-artifact@v4
         with:
           name: AccessOne-APK
