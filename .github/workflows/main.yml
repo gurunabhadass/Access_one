@@ -1,0 +1,121 @@
+name: Build AccessOne APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "index.html"
+      - "logo.png"
+      - ".github/workflows/main.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Install Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+
+      - name: Prepare web assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f index.html
+          test -f logo.png
+          mkdir -p www
+          cp index.html www/index.html
+
+      - name: Create Capacitor Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm init -y
+          npm install @capacitor/core@7 @capacitor/android@7
+          npm install --save-dev @capacitor/cli@7
+          npx cap init "AccessOne" "com.accessone.app" --web-dir www
+          npx cap add android
+
+      - name: Configure Android permissions and uploaded app icon
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --user Pillow
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          p = Path('android/app/src/main/AndroidManifest.xml')
+          text = p.read_text()
+          for perm in ['android.permission.CAMERA', 'android.permission.INTERNET']:
+              marker = f'<uses-permission android:name="{perm}" />'
+              if marker not in text:
+                  text = text.replace('<application', marker + '\n    <application', 1)
+          if 'android.hardware.camera' not in text:
+              text = text.replace('<application', '<uses-feature android:name="android.hardware.camera" android:required="false" />\n    <application', 1)
+          p.write_text(text)
+          PY
+          python3 - <<'PY'
+          from pathlib import Path
+          from PIL import Image
+          import re
+          src = Image.open('logo.png').convert('RGBA')
+          side = min(src.size)
+          x, y = (src.width-side)//2, (src.height-side)//2
+          src = src.crop((x, y, x+side, y+side))
+          res = Path('android/app/src/main/res')
+          for density, size in {'mdpi':48,'hdpi':72,'xhdpi':96,'xxhdpi':144,'xxxhdpi':192}.items():
+              d = res / f'mipmap-{density}'
+              d.mkdir(parents=True, exist_ok=True)
+              icon = src.resize((size,size), Image.Resampling.LANCZOS)
+              icon.save(d/'ic_launcher.png')
+              icon.save(d/'ic_launcher_round.png')
+          p = Path('android/app/src/main/AndroidManifest.xml')
+          text = p.read_text()
+          m = re.search(r'<application\b[^>]*>', text, re.S)
+          if not m:
+              raise SystemExit('Android application tag missing')
+          tag = m.group(0)
+          for attr, val in [('android:icon','@mipmap/ic_launcher'), ('android:roundIcon','@mipmap/ic_launcher_round'), ('android:label','AccessOne')]:
+              if re.search(attr+r'="[^"]*"', tag):
+                  tag = re.sub(attr+r'="[^"]*"', attr+'="'+val+'"', tag)
+              else:
+                  tag = tag[:-1]+' '+attr+'="'+val+'">'
+          p.write_text(text[:m.start()] + tag + text[m.end():])
+          PY
+
+      - name: Sync Capacitor
+        run: npx cap sync android
+
+      - name: Build debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: AccessOne-APK
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 7
+          
