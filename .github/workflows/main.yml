@@ -75,7 +75,7 @@ jobs:
               xml = xml.replace('<application', '<uses-feature android:name="android.hardware.camera" android:required="false" />\\n    <application', 1)
 
           # Use the exact repository logo as launcher icon (density variants are resized copies only).
-          app_match = re.search(r'<application\\b[^>]*>', xml, re.DOTALL)
+          app_match = re.search(r'<application\b[^>]*>', xml, re.DOTALL)
           if not app_match:
               raise SystemExit('ERROR: AndroidManifest.xml has no application tag')
           app_tag = app_match.group(0)
@@ -84,8 +84,8 @@ jobs:
               ('android:icon', '@mipmap/ic_launcher'),
               ('android:roundIcon', '@mipmap/ic_launcher_round'),
           ):
-              if re.search(r'\\s' + attr + r'="[^"]*"', app_tag):
-                  app_tag = re.sub(r'\\s' + attr + r'="[^"]*"', f' {attr}="{value}"', app_tag)
+              if re.search(r'\s' + attr + r'="[^"]*"', app_tag):
+                  app_tag = re.sub(r'\s' + attr + r'="[^"]*"', f' {attr}="{value}"', app_tag)
               else:
                   app_tag = app_tag[:-1] + f' {attr}="{value}">'
           xml = xml[:app_match.start()] + app_tag + xml[app_match.end():]
